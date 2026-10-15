@@ -7,12 +7,35 @@ providers are unreachable, it flags needs_repeat so the agent politely asks the
 shopkeeper to repeat or use the typed input box.
 """
 
+import asyncio
 import base64
 import time
 from typing import Any, Callable, Optional, Tuple
 import httpx
 
 from backend.config import logger, settings
+
+# Concurrency limit: maximum 3 concurrent STT transcriptions
+_stt_semaphore = asyncio.Semaphore(3)
+
+# Persistent httpx clients per provider
+_sarvam_client: Optional[httpx.AsyncClient] = None
+_whisper_client: Optional[httpx.AsyncClient] = None
+
+
+def _get_sarvam_client() -> httpx.AsyncClient:
+    global _sarvam_client
+    if _sarvam_client is None or _sarvam_client.is_closed:
+        _sarvam_client = httpx.AsyncClient(timeout=httpx.Timeout(10.0, connect=3.0))
+    return _sarvam_client
+
+
+def _get_whisper_client() -> httpx.AsyncClient:
+    global _whisper_client
+    if _whisper_client is None or _whisper_client.is_closed:
+        _whisper_client = httpx.AsyncClient(timeout=httpx.Timeout(10.0, connect=3.0))
+    return _whisper_client
+
 
 # Optional listener for speech health events
 _speech_health_listeners: list[Callable[[dict[str, Any]], Any]] = []
@@ -52,11 +75,11 @@ async def transcribe_sarvam(
     files = {"file": ("audio.webm", audio_bytes, mime)}
     data = {"model": "saaras:v2", "language_code": f"{lang_hint}-IN" if lang_hint and lang_hint != "en" else "hi-IN"}
 
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        resp = await client.post(url, headers=headers, files=files, data=data)
-        resp.raise_for_status()
-        res_json = resp.json()
-        return res_json.get("transcript", "")
+    client = _get_sarvam_client()
+    resp = await client.post(url, headers=headers, files=files, data=data, timeout=timeout)
+    resp.raise_for_status()
+    res_json = resp.json()
+    return res_json.get("transcript", "")
 
 
 async def transcribe_groq_whisper(
@@ -77,11 +100,11 @@ async def transcribe_groq_whisper(
         "response_format": "json",
     }
 
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        resp = await client.post(url, headers=headers, files=files, data=data)
-        resp.raise_for_status()
-        res_json = resp.json()
-        return res_json.get("text", "")
+    client = _get_whisper_client()
+    resp = await client.post(url, headers=headers, files=files, data=data, timeout=timeout)
+    resp.raise_for_status()
+    res_json = resp.json()
+    return res_json.get("text", "")
 
 
 async def transcribe(
@@ -101,27 +124,28 @@ async def transcribe(
         logger.warning("Empty or truncated audio payload received")
         return "", 0.0, True
 
-    # 1. Try Sarvam if configured
-    if settings.sarvam_api_key:
-        try:
-            text = await transcribe_sarvam(audio_bytes, mime, lang_hint, timeout)
-            if text and text.strip():
-                _publish_speech_health("Sarvam-STT", ok=True, active=True)
-                return text.strip(), 0.95, False
-        except Exception as exc:
-            logger.warning("Sarvam STT failed (%s), falling back to Groq: %s", type(exc).__name__, exc)
-            _publish_speech_health("Sarvam-STT", ok=False, active=False)
+    async with _stt_semaphore:
+        # 1. Try Sarvam if configured
+        if settings.sarvam_api_key:
+            try:
+                text = await transcribe_sarvam(audio_bytes, mime, lang_hint, timeout)
+                if text and text.strip():
+                    _publish_speech_health("Sarvam-STT", ok=True, active=True)
+                    return text.strip(), 0.95, False
+            except Exception as exc:
+                logger.warning("Sarvam STT failed (%s), falling back to Groq: %s", type(exc).__name__, exc)
+                _publish_speech_health("Sarvam-STT", ok=False, active=False)
 
-    # 2. Try Groq Whisper
-    if settings.groq_api_key:
-        try:
-            text = await transcribe_groq_whisper(audio_bytes, mime, timeout)
-            if text and text.strip():
-                _publish_speech_health("Groq-Whisper", ok=True, active=True)
-                return text.strip(), 0.90, False
-        except Exception as exc:
-            logger.warning("Groq Whisper STT failed (%s): %s", type(exc).__name__, exc)
-            _publish_speech_health("Groq-Whisper", ok=False, active=False)
+        # 2. Try Groq Whisper
+        if settings.groq_api_key:
+            try:
+                text = await transcribe_groq_whisper(audio_bytes, mime, timeout)
+                if text and text.strip():
+                    _publish_speech_health("Groq-Whisper", ok=True, active=True)
+                    return text.strip(), 0.90, False
+            except Exception as exc:
+                logger.warning("Groq Whisper STT failed (%s): %s", type(exc).__name__, exc)
+                _publish_speech_health("Groq-Whisper", ok=False, active=False)
 
     # 3. Audio failed or unclear
     logger.info("Speech transcription unavailable or unclear. Requesting repeat.")
@@ -151,14 +175,14 @@ async def synthesize(
                 "target_language_code": lang_code,
                 "model": settings.sarvam_tts_model,
             }
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                resp = await client.post(url, headers=headers, json=payload)
-                if resp.status_code == 200:
-                    data = resp.json()
-                    audios = data.get("audios", [])
-                    if audios:
-                        _publish_speech_health("Sarvam-TTS", ok=True, active=True)
-                        return "audio/mpeg", audios[0]
+            client = _get_sarvam_client()
+            resp = await client.post(url, headers=headers, json=payload, timeout=timeout)
+            if resp.status_code == 200:
+                data = resp.json()
+                audios = data.get("audios", [])
+                if audios:
+                    _publish_speech_health("Sarvam-TTS", ok=True, active=True)
+                    return "audio/mpeg", audios[0]
         except Exception as exc:
             logger.warning("Sarvam TTS failed, relying on browser speech: %s", exc)
             _publish_speech_health("Sarvam-TTS", ok=False, active=False)

@@ -84,23 +84,34 @@ class CallManager:
             self.unregister_shop_socket(shop_id)
     async def send_agent_utterance(self, shop_id: str, call_id: str, text: str, lang: str) -> None:
         """
-        Sends agent text message to the shop WebSocket.
-        If speech synthesis produces audio, also sends agent_audio message.
+        Sends agent utterance. Audio order requirement:
+        send agent_audio FIRST only if TTS finishes within 1.2 s, then agent_text;
+        otherwise agent_text only. Never audio after its text.
         """
-        await self.send_to_shop(
-            shop_id,
-            AgentTextMessage(call_id=call_id, text=text, lang=lang).model_dump(),
-        )
+        audio_msg = None
         try:
-            synth = await synthesize(text, lang=lang)
+            synth = await asyncio.wait_for(synthesize(text, lang=lang), timeout=1.2)
             if synth:
                 mime, data = synth
-                await self.send_to_shop(
-                    shop_id,
-                    AgentAudioMessage(call_id=call_id, mime=mime, data=data).model_dump(),
-                )
+                audio_msg = AgentAudioMessage(call_id=call_id, mime=mime, data=data).model_dump()
         except Exception as exc:
-            logger.debug("TTS synthesis skipped or failed: %s", exc)
+            logger.debug("TTS synthesis skipped or exceeded 1.2s budget: %s", exc)
+            audio_msg = None
+
+        if audio_msg:
+            # 1. Send audio FIRST
+            await self.send_to_shop(shop_id, audio_msg)
+            # 2. Then send text
+            await self.send_to_shop(
+                shop_id,
+                AgentTextMessage(call_id=call_id, text=text, lang=lang).model_dump(),
+            )
+        else:
+            # Otherwise agent_text only
+            await self.send_to_shop(
+                shop_id,
+                AgentTextMessage(call_id=call_id, text=text, lang=lang).model_dump(),
+            )
 
     def handle_shop_answer(self, call_id: str) -> None:
         """Signals that the shop clicked Answer."""

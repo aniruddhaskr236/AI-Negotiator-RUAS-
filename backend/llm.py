@@ -7,6 +7,7 @@ never crash the live call or server. If all fail, a deterministic fallback
 is returned.
 """
 
+import asyncio
 import json
 import time
 from typing import Any, Callable, Optional, Type
@@ -88,6 +89,27 @@ def _normalize_provider_name(name: str) -> str:
     return name
 
 
+# Concurrency limit: maximum 6 concurrent LLM requests
+_llm_semaphore = asyncio.Semaphore(6)
+
+_groq_client: Optional[httpx.AsyncClient] = None
+_nemotron_client: Optional[httpx.AsyncClient] = None
+
+
+def _get_groq_client() -> httpx.AsyncClient:
+    global _groq_client
+    if _groq_client is None or _groq_client.is_closed:
+        _groq_client = httpx.AsyncClient(timeout=httpx.Timeout(10.0, connect=3.0))
+    return _groq_client
+
+
+def _get_nemotron_client() -> httpx.AsyncClient:
+    global _nemotron_client
+    if _nemotron_client is None or _nemotron_client.is_closed:
+        _nemotron_client = httpx.AsyncClient(timeout=httpx.Timeout(10.0, connect=3.0))
+    return _nemotron_client
+
+
 async def _call_groq(prompt: str, system: Optional[str], timeout: float) -> str:
     """Call Groq API using official chat completions endpoint."""
     if not settings.groq_api_key:
@@ -107,13 +129,14 @@ async def _call_groq(prompt: str, system: Optional[str], timeout: float) -> str:
         "model": settings.groq_model,
         "messages": messages,
         "temperature": 0.2,
+        "max_tokens": 80,
     }
 
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        resp = await client.post(url, headers=headers, json=payload)
-        resp.raise_for_status()
-        data = resp.json()
-        return data["choices"][0]["message"]["content"]
+    client = _get_groq_client()
+    resp = await client.post(url, headers=headers, json=payload, timeout=timeout)
+    resp.raise_for_status()
+    data = resp.json()
+    return data["choices"][0]["message"]["content"]
 
 
 async def _call_nemotron(prompt: str, system: Optional[str], timeout: float) -> str:
@@ -135,13 +158,14 @@ async def _call_nemotron(prompt: str, system: Optional[str], timeout: float) -> 
         "model": settings.nvidia_model,
         "messages": messages,
         "temperature": 0.2,
+        "max_tokens": 80,
     }
 
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        resp = await client.post(url, headers=headers, json=payload)
-        resp.raise_for_status()
-        data = resp.json()
-        return data["choices"][0]["message"]["content"]
+    client = _get_nemotron_client()
+    resp = await client.post(url, headers=headers, json=payload, timeout=timeout)
+    resp.raise_for_status()
+    data = resp.json()
+    return data["choices"][0]["message"]["content"]
 
 
 def _clean_json_markdown(text: str) -> str:
@@ -161,12 +185,12 @@ async def call_llm(
     prompt: str,
     system: Optional[str] = None,
     schema: Optional[Type[BaseModel]] = None,
-    timeout: float = 8.0,
+    timeout: float = 3.0,
 ) -> Any:
     """
     Calls providers in priority order: Groq -> Nemotron -> rule-based fallback.
     Validates output against schema if provided.
-    Falls back gracefully to the next provider on any error or timeout.
+    Falls back gracefully to the next provider on any error or timeout (including immediate on 429).
     Returns deterministic fallback if all providers fail.
     """
     providers = [
@@ -174,35 +198,45 @@ async def call_llm(
         ("Nemotron", _call_nemotron),
     ]
 
-    for name, func in providers:
-        if not is_provider_enabled(name):
-            continue
+    async with _llm_semaphore:
+        for name, func in providers:
+            if not is_provider_enabled(name):
+                continue
 
-        start_time = time.time()
-        try:
-            logger.debug("Attempting LLM call with provider %s", name)
-            raw_text = await func(prompt, system, timeout)
-            latency = int((time.time() - start_time) * 1000)
+            start_time = time.time()
+            try:
+                logger.debug("Attempting LLM call with provider %s", name)
+                raw_text = await func(prompt, system, timeout)
+                latency = int((time.time() - start_time) * 1000)
 
-            # If schema validation is required, validate JSON format
-            if schema is not None:
-                cleaned = _clean_json_markdown(raw_text)
-                parsed_json = json.loads(cleaned)
-                result = schema.model_validate(parsed_json)
-            else:
-                result = raw_text
+                # If schema validation is required, validate JSON format
+                if schema is not None:
+                    cleaned = _clean_json_markdown(raw_text)
+                    parsed_json = json.loads(cleaned)
+                    result = schema.model_validate(parsed_json)
+                else:
+                    result = raw_text
 
-            # Mark successful provider active
-            _publish_health(name, ok=True, active=True)
-            _provider_health[name]["latency_ms"] = latency
-            return result
+                # Mark successful provider active
+                _publish_health(name, ok=True, active=True)
+                _provider_health[name]["latency_ms"] = latency
+                return result
 
-        except Exception as exc:
-            latency = int((time.time() - start_time) * 1000)
-            logger.warning("Provider %s failed (%s): %s", name, type(exc).__name__, exc)
-            _publish_health(name, ok=False, active=False, error=str(exc))
-            _provider_health[name]["latency_ms"] = latency
-            # Continue to next provider in fallback chain
+            except httpx.HTTPStatusError as exc:
+                latency = int((time.time() - start_time) * 1000)
+                if exc.response.status_code == 429:
+                    logger.warning("Provider %s rate-limited (HTTP 429). Falling back immediately.", name)
+                else:
+                    logger.warning("Provider %s HTTP error %s: %s", name, exc.response.status_code, exc)
+                _publish_health(name, ok=False, active=False, error=f"HTTP {exc.response.status_code}")
+                _provider_health[name]["latency_ms"] = latency
+                continue
+            except Exception as exc:
+                latency = int((time.time() - start_time) * 1000)
+                logger.warning("Provider %s failed (%s): %s", name, type(exc).__name__, exc)
+                _publish_health(name, ok=False, active=False, error=str(exc))
+                _provider_health[name]["latency_ms"] = latency
+                continue
 
     logger.error("All LLM providers failed or are disabled. Returning rule-based fallback.")
     if schema is not None:

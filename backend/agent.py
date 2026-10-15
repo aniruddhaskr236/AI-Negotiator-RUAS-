@@ -7,6 +7,7 @@ to hallucinate an uncollected price, the Number Guard catches it and falls back
 to a safe verified template.
 """
 
+import asyncio
 import re
 from typing import List, Optional, Tuple
 
@@ -185,14 +186,25 @@ async def generate_agent_utterance(
     )
 
     try:
-        candidate = await call_llm(prompt=prompt, system=system_prompt, timeout=4.0)
+        # 3s timeout on LLM call with an overall 4s budget
+        candidate = await asyncio.wait_for(
+            call_llm(prompt=prompt, system=system_prompt, timeout=3.0),
+            timeout=4.0,
+        )
         candidate = candidate.strip().strip('"')
+
+        # Real-time budget: at most 25 words
+        words = candidate.split()
+        if len(words) > 25:
+            candidate = " ".join(words[:25])
+            if not candidate.endswith((".", "?", "!")):
+                candidate += "."
 
         # Check Number Guard
         if audit_number_guard(candidate, action, current_shop_price):
             # Check agreement to buy guard
             lower_c = candidate.lower()
-            if any(forbidden in lower_c for forbidden in ["i will buy", "deal done", "book it", "confirm order"]):
+            if any(forbidden in lower_c for forbidden in ["i will buy", "deal done", "book it", "confirm order", "i agree to buy"]):
                 logger.warning("Agent utterance contained forbidden purchase agreement. Using fallback.")
                 return fallback_text, fallback_en
 
@@ -201,5 +213,5 @@ async def generate_agent_utterance(
             return fallback_text, fallback_en
 
     except Exception as exc:
-        logger.warning("LLM utterance generation failed (%s), using safe template", exc)
+        logger.warning("LLM utterance generation failed or budget exceeded (%s), using safe template", exc)
         return fallback_text, fallback_en
