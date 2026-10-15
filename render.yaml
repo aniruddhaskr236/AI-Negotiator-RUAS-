@@ -20,7 +20,7 @@ services:
       - key: NVIDIA_MODEL
         value: nvidia/nemotron-3.5-lightning-30b-a3b
       - key: PYTHON_VERSION
-        value: "3.11.10"
+        value: "3.11.9"
       - key: NODE_VERSION
         value: "20"
       - key: DB_PATH

@@ -9,6 +9,7 @@ and ensuring verified defaults are always available.
 import os
 import logging
 from dataclasses import dataclass
+from typing import Optional
 
 
 @dataclass
@@ -42,8 +43,11 @@ class Settings:
 settings = Settings()
 
 
-def setup_logging(level: int = logging.INFO) -> logging.Logger:
+def setup_logging(level: Optional[int] = None) -> logging.Logger:
     """Configures safe, structured logging without leaking secrets."""
+    if level is None:
+        log_level_name = os.getenv("LOG_LEVEL", "INFO").upper()
+        level = getattr(logging, log_level_name, logging.INFO)
     logger = logging.getLogger("bhaav")
     if not logger.handlers:
         handler = logging.StreamHandler()
@@ -53,7 +57,7 @@ def setup_logging(level: int = logging.INFO) -> logging.Logger:
         )
         handler.setFormatter(formatter)
         logger.addHandler(handler)
-        logger.setLevel(level)
+    logger.setLevel(level)
     return logger
 
 
