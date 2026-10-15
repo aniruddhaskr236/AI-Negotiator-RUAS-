@@ -76,7 +76,7 @@ export function HomePage() {
     ],
     ["YOU DECIDE", "Get one ranked recommendation with the receipts attached."],
   ]
-  const stack = ["React", "FastAPI", "Groq", "Mistral", "Nemotron", "Sarvam"]
+  const stack = ["React", "FastAPI", "Groq", "Nemotron", "Sarvam"]
 
   return (
     <div className="poster-landing">
@@ -170,7 +170,6 @@ const checkDefinitions = [
   { id: "websocket", label: "WebSocket" },
   { id: "server", label: "Server health" },
   { id: "groq", label: "Groq" },
-  { id: "mistral", label: "Mistral" },
   { id: "nemotron", label: "Nemotron" },
   { id: "sarvam", label: "Sarvam speech" },
 ] as const
@@ -208,11 +207,10 @@ export function CheckPage() {
       websocket: typeof WebSocket !== "undefined",
       server: navigator.onLine,
       groq: true,
-      mistral: true,
       nemotron: true,
       sarvam: true,
     }
-    const latencies = [18, 12, 31, 44, 126, 158, 211, 184]
+    const latencies = [18, 12, 31, 44, 126, 211, 184]
 
     checkDefinitions.forEach((check, index) => {
       window.setTimeout(
@@ -467,8 +465,7 @@ export function DashboardPage() {
           <div className="provider-group" aria-label="AI provider health">
             <span>LAST ROUTE</span>
             <HealthChip state="online" label="GROQ" />
-            <HealthChip state="online" label="MISTRAL" />
-            <HealthChip state="offline" label="NEMOTRON" />
+            <HealthChip state="online" label="NEMOTRON" />
             <HealthChip state="online" label="SARVAM" />
           </div>
           <button

@@ -1,6 +1,6 @@
 import { useEffect, useRef, type ReactNode } from "react"
 import { Link } from "react-router"
-import type { CallStatus, Shop, TranscriptTurn } from "@/mock"
+import type { CallStatus, Shop, TranscriptTurn } from "@/types"
 
 type AsyncState = "ready" | "loading" | "empty" | "error" | "reconnecting"
 export type EvidenceField = "first_price" | "final_price" | "warranty" | "time"
