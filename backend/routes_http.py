@@ -5,9 +5,11 @@ Design decision: Keeping request handlers thin and offloading orchestration
 to CallManager and Store guarantees testability and separation of concerns.
 """
 
+import os
 import time
 from typing import Optional
 from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import FileResponse, HTMLResponse
 
 from backend.calls import call_manager
 from backend.config import logger, settings
@@ -101,10 +103,32 @@ async def get_report(job_id: str, weights: Optional[str] = Query(None)):
     )
 
 
+STATIC_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "static"))
+
+
+@router.get("/dev/shop/{shop_id}")
+async def dev_shop_page(shop_id: str):
+    """Developer-only phone page for shop simulation and voice testing."""
+    file_path = os.path.join(STATIC_DIR, "dev_shop.html")
+    if os.path.exists(file_path):
+        return FileResponse(file_path, media_type="text/html")
+    return HTMLResponse("<h3>Dev shop page not found</h3>", status_code=404)
+
+
+@router.get("/dev/dashboard/{job_id}")
+async def dev_dashboard_page(job_id: str):
+    """Developer-only dashboard event viewer for a job id."""
+    file_path = os.path.join(STATIC_DIR, "dev_dashboard.html")
+    if os.path.exists(file_path):
+        return FileResponse(file_path, media_type="text/html")
+    return HTMLResponse("<h3>Dev dashboard page not found</h3>", status_code=404)
+
+
 @router.get("/api/check", response_model=CheckResponse)
 async def check_system():
     """
-    Diagnostic endpoint reporting status and latency of server, LLM providers and speech providers.
+    Diagnostic endpoint reporting status and latency of server, database,
+    LLM providers (Groq, Nemotron) and speech providers (Groq Whisper, Sarvam).
     """
     checks = []
 
@@ -116,21 +140,58 @@ async def check_system():
         t0 = time.time()
         store.init_db()
         lat = int((time.time() - t0) * 1000)
-        checks.append(CheckItem(name="SQLite Store", ok=True, latency_ms=lat, detail="Database accessible"))
+        checks.append(CheckItem(name="Database", ok=True, latency_ms=lat, detail="SQLite database operational"))
     except Exception as e:
-        checks.append(CheckItem(name="SQLite Store", ok=False, latency_ms=0, detail=str(e)))
+        checks.append(CheckItem(name="Database", ok=False, latency_ms=0, detail=str(e)))
 
     # 3. LLM providers
     llm_health = get_all_provider_health()
-    for prov, status in llm_health.items():
-        checks.append(
-            CheckItem(
-                name=f"LLM: {prov}",
-                ok=status.get("ok", True),
-                latency_ms=status.get("latency_ms", 0),
-                detail="Active" if status.get("active") else (status.get("last_error") or "Standby"),
-            )
+    # Groq LLM
+    groq_h = llm_health.get("Groq", {})
+    groq_ok = bool(settings.groq_api_key) and groq_h.get("ok", True)
+    checks.append(
+        CheckItem(
+            name="LLM: Groq",
+            ok=groq_ok,
+            latency_ms=groq_h.get("latency_ms", 0),
+            detail="Active (primary)" if groq_ok else (groq_h.get("last_error") or "Key not set"),
         )
+    )
+
+    # Nemotron LLM
+    nemo_h = llm_health.get("Nemotron", {})
+    nemo_ok = bool(settings.nvidia_api_key) and nemo_h.get("ok", True)
+    checks.append(
+        CheckItem(
+            name="LLM: Nemotron",
+            ok=nemo_ok,
+            latency_ms=nemo_h.get("latency_ms", 0),
+            detail="Active (fallback)" if nemo_ok else (nemo_h.get("last_error") or "Key not set"),
+        )
+    )
+
+    # 4. Speech providers
+    # Groq Whisper STT
+    whisper_ok = bool(settings.groq_api_key)
+    checks.append(
+        CheckItem(
+            name="Speech: Groq Whisper",
+            ok=whisper_ok,
+            latency_ms=0,
+            detail="whisper-large-v3 configured" if whisper_ok else "GROQ_API_KEY missing",
+        )
+    )
+
+    # Sarvam STT/TTS
+    sarvam_ok = bool(settings.sarvam_api_key)
+    checks.append(
+        CheckItem(
+            name="Speech: Sarvam",
+            ok=sarvam_ok,
+            latency_ms=0,
+            detail="Saaras v2 / Bulbul v3 configured" if sarvam_ok else "SARVAM_API_KEY missing (optional Indic)",
+        )
+    )
 
     return CheckResponse(checks=checks)
 

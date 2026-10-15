@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Bhaav Dev Shop Phone</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --card: #1e293b;
+      --border: #334155;
+      --text: #f8fafc;
+      --text-muted: #94a3b8;
+      --primary: #3b82f6;
+      --primary-hover: #2563eb;
+      --success: #22c55e;
+      --danger: #ef4444;
+      --warning: #f59e0b;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+    body { background: var(--bg); color: var(--text); padding: 1.5rem; display: flex; justify-content: center; }
+    .container { width: 100%; max-width: 500px; display: flex; flex-direction: column; gap: 1rem; }
+    header { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 1rem 1.25rem; display: flex; justify-content: space-between; align-items: center; }
+    .badge { padding: 0.25rem 0.6rem; border-radius: 9999px; font-size: 0.75rem; font-weight: 600; text-transform: uppercase; }
+    .badge-online { background: rgba(34, 197, 94, 0.2); color: var(--success); border: 1px solid var(--success); }
+    .badge-offline { background: rgba(239, 68, 68, 0.2); color: var(--danger); border: 1px solid var(--danger); }
+    .badge-ringing { background: rgba(245, 158, 11, 0.2); color: var(--warning); border: 1px solid var(--warning); animation: pulse 1s infinite; }
+    @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }
+    .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 1.25rem; }
+    .actions { display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; }
+    button { padding: 0.85rem; border: none; border-radius: 8px; font-size: 0.95rem; font-weight: 600; cursor: pointer; transition: all 0.15s; }
+    button:disabled { opacity: 0.4; cursor: not-allowed; }
+    .btn-answer { background: var(--success); color: white; }
+    .btn-answer:hover:not(:disabled) { background: #16a34a; }
+    .btn-hangup { background: var(--danger); color: white; }
+    .btn-hangup:hover:not(:disabled) { background: #dc2626; }
+    .btn-talk { background: var(--primary); color: white; grid-column: span 2; }
+    .btn-talk.recording { background: var(--danger); animation: pulse 0.8s infinite; }
+    .transcript { height: 260px; overflow-y: auto; display: flex; flex-direction: column; gap: 0.5rem; background: #090d16; padding: 0.75rem; border-radius: 8px; border: 1px solid var(--border); font-size: 0.9rem; }
+    .turn { padding: 0.5rem 0.75rem; border-radius: 6px; max-width: 85%; }
+    .turn-agent { background: #1e3a8a; align-self: flex-start; color: #dbeafe; }
+    .turn-shop { background: #14532d; align-self: flex-end; color: #dcfce7; }
+    .turn-system { background: #374151; align-self: center; font-size: 0.8rem; color: #9ca3af; }
+    .typed-row { display: flex; gap: 0.5rem; }
+    .typed-row input { flex: 1; background: #090d16; border: 1px solid var(--border); border-radius: 8px; padding: 0.6rem 0.8rem; color: white; font-size: 0.9rem; }
+    .typed-row button { background: var(--primary); color: white; padding: 0.6rem 1rem; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <div>
+        <h2 id="shopTitle">Shop Phone</h2>
+        <span style="font-size: 0.8rem; color: var(--text-muted);" id="shopSub">Shop ID: ...</span>
+      </div>
+      <div id="connBadge" class="badge badge-offline">Connecting...</div>
+    </header>
+
+    <div class="card" style="display: flex; flex-direction: column; gap: 0.75rem;">
+      <div style="display: flex; justify-content: space-between; align-items: center;">
+        <span style="font-weight: 600;">Call Status:</span>
+        <span id="callStatus" class="badge" style="background:#374151; color:#9ca3af;">Idle</span>
+      </div>
+      <div class="actions">
+        <button id="answerBtn" class="btn-answer" disabled>Answer Call</button>
+        <button id="hangupBtn" class="btn-hangup" disabled>Hang Up</button>
+        <button id="talkBtn" class="btn-talk" disabled>Hold / Tap to Speak</button>
+      </div>
+    </div>
+
+    <div class="card" style="display: flex; flex-direction: column; gap: 0.5rem;">
+      <span style="font-weight: 600; font-size: 0.85rem; color: var(--text-muted);">LIVE TRANSCRIPT</span>
+      <div id="transcript" class="transcript">
+        <div class="turn turn-system">Waiting for incoming call...</div>
+      </div>
+      <div class="typed-row">
+        <input id="typedInput" type="text" placeholder="Type shopkeeper reply..." disabled>
+        <button id="sendBtn" disabled>Send</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const pathParts = window.location.pathname.split('/');
+    const shopId = pathParts[pathParts.length - 1] || "1";
+    document.getElementById("shopTitle").innerText = "Shop Phone #" + shopId;
+    document.getElementById("shopSub").innerText = "Shop ID: " + shopId;
+
+    let ws = null;
+    let activeCallId = null;
+    let mediaRecorder = null;
+    let audioStream = null;
+    let audioContext = null;
+    let isRecording = false;
+
+    const connBadge = document.getElementById("connBadge");
+    const callStatus = document.getElementById("callStatus");
+    const answerBtn = document.getElementById("answerBtn");
+    const hangupBtn = document.getElementById("hangupBtn");
+    const talkBtn = document.getElementById("talkBtn");
+    const transcript = document.getElementById("transcript");
+    const typedInput = document.getElementById("typedInput");
+    const sendBtn = document.getElementById("sendBtn");
+
+    function addTurn(speaker, text) {
+      const div = document.createElement("div");
+      div.className = "turn turn-" + speaker;
+      div.innerText = (speaker === "agent" ? "🤖 Agent: " : speaker === "shop" ? "👤 Shop: " : "") + text;
+      transcript.appendChild(div);
+      transcript.scrollTop = transcript.scrollHeight;
+    }
+
+    function connect() {
+      const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+      const url = `${proto}//${window.location.host}/ws/shop/${shopId}`;
+      ws = new WebSocket(url);
+
+      ws.onopen = () => {
+        connBadge.className = "badge badge-online";
+        connBadge.innerText = "Online";
+      };
+
+      ws.onclose = () => {
+        connBadge.className = "badge badge-offline";
+        connBadge.innerText = "Offline";
+        setTimeout(connect, 2000);
+      };
+
+      ws.onmessage = (event) => {
+        const msg = JSON.parse(event.data);
+        if (msg.type === "ring") {
+          activeCallId = msg.call_id;
+          callStatus.className = "badge badge-ringing";
+          callStatus.innerText = "Ringing...";
+          answerBtn.disabled = false;
+          addTurn("system", "Incoming call from: " + (msg.caller || "AI Assistant"));
+        } else if (msg.type === "agent_text") {
+          addTurn("agent", msg.text);
+          // Fallback browser speech if audio not played
+          if (!window._audioPlayed && 'speechSynthesis' in window) {
+            const utter = new SpeechSynthesisUtterance(msg.text);
+            utter.lang = msg.lang === "hi" ? "hi-IN" : "en-IN";
+            window.speechSynthesis.speak(utter);
+          }
+          window._audioPlayed = false;
+        } else if (msg.type === "agent_audio") {
+          try {
+            const snd = new Audio("data:" + msg.mime + ";base64," + msg.data);
+            window._audioPlayed = true;
+            snd.play();
+          } catch(e) {
+            console.error("Audio playback error:", e);
+          }
+        } else if (msg.type === "end") {
+          callStatus.className = "badge badge-offline";
+          callStatus.innerText = "Ended";
+          answerBtn.disabled = true;
+          hangupBtn.disabled = true;
+          talkBtn.disabled = true;
+          typedInput.disabled = true;
+          sendBtn.disabled = true;
+          addTurn("system", "Call ended.");
+          stopRecording();
+        }
+      };
+    }
+
+    answerBtn.onclick = async () => {
+      if (!activeCallId) return;
+      ws.send(JSON.stringify({ type: "answer", call_id: activeCallId }));
+      callStatus.className = "badge badge-online";
+      callStatus.innerText = "In Call";
+      answerBtn.disabled = true;
+      hangupBtn.disabled = false;
+      talkBtn.disabled = false;
+      typedInput.disabled = false;
+      sendBtn.disabled = false;
+      initMic();
+    };
+
+    hangupBtn.onclick = () => {
+      if (activeCallId && ws) {
+        ws.send(JSON.stringify({ type: "hangup", call_id: activeCallId }));
+      }
+      callStatus.className = "badge badge-offline";
+      callStatus.innerText = "Hung Up";
+      answerBtn.disabled = true;
+      hangupBtn.disabled = true;
+      talkBtn.disabled = true;
+      typedInput.disabled = true;
+      sendBtn.disabled = true;
+      stopRecording();
+    };
+
+    sendBtn.onclick = () => {
+      const text = typedInput.value.trim();
+      if (!text || !activeCallId) return;
+      ws.send(JSON.stringify({ type: "text", call_id: activeCallId, text: text }));
+      addTurn("shop", text);
+      typedInput.value = "";
+    };
+
+    typedInput.onkeydown = (e) => {
+      if (e.key === "Enter") sendBtn.click();
+    };
+
+    async function initMic() {
+      try {
+        audioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        const source = audioContext.createMediaStreamSource(audioStream);
+        const analyser = audioContext.createAnalyser();
+        analyser.fftSize = 512;
+        source.connect(analyser);
+
+        const dataArray = new Uint8Array(analyser.frequencyBinCount);
+        let silenceStart = Date.now();
+        let hasSpoken = false;
+
+        setInterval(() => {
+          if (!isRecording) return;
+          analyser.getByteFrequencyData(dataArray);
+          let sum = 0;
+          for (let i = 0; i < dataArray.length; i++) sum += dataArray[i];
+          const avg = sum / dataArray.length;
+
+          if (avg > 15) {
+            hasSpoken = true;
+            silenceStart = Date.now();
+          } else if (hasSpoken && Date.now() - silenceStart > 700) {
+            // Silence detected after speech, stop utterance
+            stopRecording();
+          }
+        }, 100);
+      } catch(e) {
+        console.warn("Microphone not available, typed fallback active:", e);
+      }
+    }
+
+    function startRecording() {
+      if (!audioStream || isRecording) return;
+      isRecording = true;
+      talkBtn.classList.add("recording");
+      talkBtn.innerText = "Listening... (or Release to Send)";
+      const chunks = [];
+      const mime = MediaRecorder.isTypeSupported("audio/webm;codecs=opus") ? "audio/webm;codecs=opus" : "audio/webm";
+      mediaRecorder = new MediaRecorder(audioStream, { mimeType: mime });
+      mediaRecorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
+      mediaRecorder.onstop = () => {
+        const blob = new Blob(chunks, { type: mime });
+        if (blob.size > 400 && activeCallId) {
+          const reader = new FileReader();
+          reader.onloadend = () => {
+            const b64 = reader.result.split(",")[1];
+            ws.send(JSON.stringify({
+              type: "audio",
+              call_id: activeCallId,
+              mime: "audio/webm",
+              data: b64,
+              ts: Date.now() / 1000
+            }));
+            addTurn("shop", "[Spoken audio sent]");
+          };
+          reader.readAsDataURL(blob);
+        }
+      };
+      mediaRecorder.start();
+    }
+
+    function stopRecording() {
+      if (!isRecording) return;
+      isRecording = false;
+      talkBtn.classList.remove("recording");
+      talkBtn.innerText = "Hold / Tap to Speak";
+      if (mediaRecorder && mediaRecorder.state !== "inactive") {
+        mediaRecorder.stop();
+      }
+    }
+
+    talkBtn.onmousedown = startRecording;
+    talkBtn.onmouseup = stopRecording;
+    talkBtn.ontouchstart = (e) => { e.preventDefault(); startRecording(); };
+    talkBtn.ontouchend = (e) => { e.preventDefault(); stopRecording(); };
+
+    connect();
+  </script>
+</body>
+</html>

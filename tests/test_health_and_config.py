@@ -15,5 +15,4 @@ def test_health_endpoint():
 def test_config_model_defaults():
     """Verify default verified models are populated."""
     assert "llama-3.3" in settings.groq_model
-    assert "mistral" in settings.mistral_model
     assert "nemotron" in settings.nvidia_model

@@ -40,30 +40,6 @@ async def ping_groq() -> tuple[bool, int, str]:
         return False, lat, f"Error: {e}"
 
 
-async def ping_mistral() -> tuple[bool, int, str]:
-    """Test Mistral API connectivity with a minimal completion."""
-    if not settings.mistral_api_key:
-        return False, 0, "MISTRAL_API_KEY not set"
-    t0 = time.time()
-    try:
-        url = "https://api.mistral.ai/v1/chat/completions"
-        headers = {"Authorization": f"Bearer {settings.mistral_api_key}", "Content-Type": "application/json"}
-        payload = {
-            "model": settings.mistral_model,
-            "messages": [{"role": "user", "content": "ping"}],
-            "max_tokens": 5,
-        }
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.post(url, headers=headers, json=payload)
-            lat = int((time.time() - t0) * 1000)
-            if resp.status_code == 200:
-                return True, lat, "OK"
-            return False, lat, f"HTTP {resp.status_code}"
-    except Exception as e:
-        lat = int((time.time() - t0) * 1000)
-        return False, lat, f"Error: {e}"
-
-
 async def ping_nvidia() -> tuple[bool, int, str]:
     """Test NVIDIA Nemotron NIM API connectivity with a minimal completion."""
     if not settings.nvidia_api_key:
@@ -122,7 +98,6 @@ async def main():
 
     checks = [
         ("Groq", bool(settings.groq_api_key), ping_groq),
-        ("Mistral", bool(settings.mistral_api_key), ping_mistral),
         ("NVIDIA", bool(settings.nvidia_api_key), ping_nvidia),
         ("Sarvam", bool(settings.sarvam_api_key), ping_sarvam),
     ]

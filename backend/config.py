@@ -17,13 +17,11 @@ class Settings:
 
     # API Keys - never printed or logged directly
     groq_api_key: str = os.getenv("GROQ_API_KEY", "")
-    mistral_api_key: str = os.getenv("MISTRAL_API_KEY", "")
     nvidia_api_key: str = os.getenv("NVIDIA_API_KEY", "")
     sarvam_api_key: str = os.getenv("SARVAM_API_KEY", "")
 
     # Verified production model defaults (lookup confirmed against docs)
     groq_model: str = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
-    mistral_model: str = os.getenv("MISTRAL_MODEL", "mistral-small-latest")
     nvidia_model: str = os.getenv("NVIDIA_MODEL", "nvidia/nemotron-3.5-lightning-30b-a3b")
 
     # Speech model defaults

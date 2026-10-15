@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Bhaav Dev Dashboard</title>
+  <style>
+    :root {
+      --bg: #0b0f19;
+      --card: #151d30;
+      --border: #232f48;
+      --text: #f1f5f9;
+      --text-muted: #94a3b8;
+      --primary: #3b82f6;
+      --success: #22c55e;
+      --danger: #ef4444;
+      --warning: #f59e0b;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+    body { background: var(--bg); color: var(--text); padding: 1.5rem; }
+    .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.5rem; }
+    .badge { padding: 0.25rem 0.6rem; border-radius: 9999px; font-size: 0.75rem; font-weight: 600; text-transform: uppercase; }
+    .badge-online { background: rgba(34, 197, 94, 0.2); color: var(--success); border: 1px solid var(--success); }
+    .badge-offline { background: rgba(239, 68, 68, 0.2); color: var(--danger); border: 1px solid var(--danger); }
+    .grid { display: grid; grid-template-columns: 2fr 1fr; gap: 1.5rem; }
+    .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 1.25rem; display: flex; flex-direction: column; gap: 1rem; }
+    .events-log { height: 500px; overflow-y: auto; background: #080c14; border: 1px solid var(--border); border-radius: 8px; padding: 0.75rem; font-family: monospace; font-size: 0.85rem; display: flex; flex-direction: column; gap: 0.5rem; }
+    .event-item { padding: 0.5rem; border-radius: 4px; border-left: 3px solid var(--primary); background: #0f172a; word-break: break-all; }
+    .event-turn { border-left-color: var(--primary); }
+    .event-offer { border-left-color: var(--success); }
+    .event-conflict { border-left-color: var(--danger); }
+    .event-health { border-left-color: var(--warning); }
+    .event-timeline { border-left-color: #8b5cf6; }
+    .health-bar { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+    .health-chip { padding: 0.25rem 0.5rem; border-radius: 6px; font-size: 0.75rem; font-weight: bold; background: #1e293b; border: 1px solid var(--border); }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div>
+      <h1 id="dashTitle">Bhaav Dev Event Stream</h1>
+      <span style="font-size: 0.85rem; color: var(--text-muted);" id="jobSub">Job ID: ...</span>
+    </div>
+    <div style="display: flex; gap: 0.75rem; align-items: center;">
+      <a id="reportLink" href="#" target="_blank" style="color: var(--primary); text-decoration: none; font-size: 0.9rem; font-weight: 600;">View Report JSON &rarr;</a>
+      <div id="connBadge" class="badge badge-offline">Connecting...</div>
+    </div>
+  </div>
+
+  <div class="grid">
+    <div class="card">
+      <div style="display: flex; justify-content: space-between; align-items: center;">
+        <span style="font-weight: 600;">EVENT STREAM</span>
+        <span id="eventCount" style="font-size: 0.8rem; color: var(--text-muted);">0 events</span>
+      </div>
+      <div id="eventsLog" class="events-log"></div>
+    </div>
+
+    <div style="display: flex; flex-direction: column; gap: 1.5rem;">
+      <div class="card">
+        <span style="font-weight: 600;">PROVIDER HEALTH</span>
+        <div id="healthChips" class="health-bar">
+          <div class="health-chip" id="chip-Groq">Groq: STANDBY</div>
+          <div class="health-chip" id="chip-Nemotron">Nemotron: STANDBY</div>
+          <div class="health-chip" id="chip-Sarvam">Sarvam: STANDBY</div>
+        </div>
+      </div>
+
+      <div class="card">
+        <span style="font-weight: 600;">ACTIVE CALLS</span>
+        <div id="callsList" style="display: flex; flex-direction: column; gap: 0.5rem; font-size: 0.85rem;">
+          <div style="color: var(--text-muted);">Listening for call_status events...</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const pathParts = window.location.pathname.split('/');
+    const jobId = pathParts[pathParts.length - 1] || "latest";
+    document.getElementById("dashTitle").innerText = "Bhaav Dev Stream: " + jobId;
+    document.getElementById("jobSub").innerText = "Job ID: " + jobId;
+    document.getElementById("reportLink").href = `/api/jobs/${jobId}/report`;
+
+    const connBadge = document.getElementById("connBadge");
+    const eventsLog = document.getElementById("eventsLog");
+    const eventCount = document.getElementById("eventCount");
+    let count = 0;
+
+    function addEvent(ev) {
+      count++;
+      eventCount.innerText = count + " events";
+      const div = document.createElement("div");
+      div.className = "event-item event-" + (ev.type || "system");
+      div.innerText = `[${new Date().toLocaleTimeString()}] ${ev.type.toUpperCase()}: ` + JSON.stringify(ev, null, 2);
+      eventsLog.appendChild(div);
+      eventsLog.scrollTop = eventsLog.scrollHeight;
+
+      if (ev.type === "health" && ev.provider) {
+        const chip = document.getElementById("chip-" + ev.provider);
+        if (chip) {
+          chip.style.borderColor = ev.ok ? "var(--success)" : "var(--danger)";
+          chip.style.color = ev.ok ? "var(--success)" : "var(--danger)";
+          chip.innerText = `${ev.provider}: ${ev.active ? "ACTIVE" : (ev.ok ? "OK" : "DOWN")}`;
+        }
+      }
+    }
+
+    function connect() {
+      const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+      const url = `${proto}//${window.location.host}/ws/dashboard/${jobId}`;
+      const ws = new WebSocket(url);
+
+      ws.onopen = () => {
+        connBadge.className = "badge badge-online";
+        connBadge.innerText = "Online";
+      };
+
+      ws.onclose = () => {
+        connBadge.className = "badge badge-offline";
+        connBadge.innerText = "Offline";
+        setTimeout(connect, 2000);
+      };
+
+      ws.onmessage = (e) => {
+        try {
+          const ev = JSON.parse(e.data);
+          addEvent(ev);
+        } catch(err) {}
+      };
+    }
+
+    connect();
+  </script>
+</body>
+</html>
