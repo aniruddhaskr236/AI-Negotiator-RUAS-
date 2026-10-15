@@ -18,6 +18,7 @@ from backend.bus import publish_event
 from backend.config import logger, settings
 from backend.extract import detect_conflicts, extract_offer
 from backend.models import (
+    AgentAudioMessage,
     AgentTextMessage,
     Call,
     CallStatusEvent,
@@ -26,10 +27,12 @@ from backend.models import (
     OfferEvent,
     ReportReadyEvent,
     RingMessage,
+    TimelineEvent,
     Turn,
     TurnEvent,
     Weights,
 )
+from backend.speech import synthesize
 from backend.negotiation import (
     NegotiationAction,
     NegotiationState,
@@ -79,7 +82,25 @@ class CallManager:
         except Exception as exc:
             logger.warning("Failed to send message to shop %s: %s", shop_id, exc)
             self.unregister_shop_socket(shop_id)
-            return False
+    async def send_agent_utterance(self, shop_id: str, call_id: str, text: str, lang: str) -> None:
+        """
+        Sends agent text message to the shop WebSocket.
+        If speech synthesis produces audio, also sends agent_audio message.
+        """
+        await self.send_to_shop(
+            shop_id,
+            AgentTextMessage(call_id=call_id, text=text, lang=lang).model_dump(),
+        )
+        try:
+            synth = await synthesize(text, lang=lang)
+            if synth:
+                mime, data = synth
+                await self.send_to_shop(
+                    shop_id,
+                    AgentAudioMessage(call_id=call_id, mime=mime, data=data).model_dump(),
+                )
+        except Exception as exc:
+            logger.debug("TTS synthesis skipped or failed: %s", exc)
 
     def handle_shop_answer(self, call_id: str) -> None:
         """Signals that the shop clicked Answer."""
@@ -258,9 +279,8 @@ class CallManager:
                     ts=agent_turn.ts,
                 ),
             )
-            await self.send_to_shop(
-                call.shop_id,
-                AgentTextMessage(call_id=call_id, text=agent_text, lang=call.lang).model_dump(),
+            await self.send_agent_utterance(
+                call.shop_id, call_id, agent_text, call.lang
             )
             state = greet_action.next_state
 
@@ -282,6 +302,8 @@ class CallManager:
                 shop_text = ""
                 shop_lang = call.lang
                 shop_hangup = False
+                turn_ts = time.time()
+                turn_confidence = 1.0
 
                 if settings.scripted_shops and simulator:
                     await asyncio.sleep(0.05)
@@ -317,12 +339,35 @@ class CallManager:
                             break
 
                     mtype = msg.get("type")
+                    if msg.get("ts"):
+                        turn_ts = float(msg["ts"])
                     if mtype == "hangup":
                         shop_hangup = True
                     elif mtype == "text":
                         shop_text = msg.get("text", "")
+                        turn_confidence = msg.get("confidence", 1.0)
                     elif mtype == "audio":
-                        shop_text = "[Spoken audio from shop]"
+                        if msg.get("needs_repeat"):
+                            repeat_prompt = (
+                                "Sorry, I could not hear that clearly. Could you please repeat or type your answer?"
+                                if call.lang == "en"
+                                else "माफ़ कीजिए, मुझे ठीक से सुनाई नहीं दिया। क्या आप दोबारा बता सकते हैं?"
+                            )
+                            await self.send_agent_utterance(
+                                call.shop_id, call_id, repeat_prompt, call.lang
+                            )
+                            publish_event(
+                                job_id,
+                                TimelineEvent(
+                                    call_id=call_id,
+                                    text="Audio from shop was unclear; agent requested repetition.",
+                                    ts=time.time(),
+                                ),
+                            )
+                            continue
+
+                        shop_text = msg.get("text", "")
+                        turn_confidence = msg.get("confidence", 0.9)
 
                 if shop_hangup:
                     call.status = "failed"
@@ -335,14 +380,13 @@ class CallManager:
                     break
 
                 # B. Store & publish shop turn
-                turn_ts = time.time()
                 shop_turn = Turn(
                     call_id=call_id,
                     speaker="shop",
                     text=shop_text,
                     lang=shop_lang,  # type: ignore
                     ts=turn_ts,
-                    confidence=1.0,
+                    confidence=turn_confidence,
                 )
                 store.add_turn(shop_turn)
                 publish_event(
@@ -353,6 +397,7 @@ class CallManager:
                         text=shop_text,
                         lang=shop_lang,  # type: ignore
                         ts=turn_ts,
+                        confidence=turn_confidence,
                     ),
                 )
 
@@ -436,9 +481,8 @@ class CallManager:
                         ts=agent_turn.ts,
                     ),
                 )
-                await self.send_to_shop(
-                    call.shop_id,
-                    AgentTextMessage(call_id=call_id, text=agent_text, lang=call.lang).model_dump(),
+                await self.send_agent_utterance(
+                    call.shop_id, call_id, agent_text, call.lang
                 )
 
                 # F. If negotiation reached DECIDE or CLOSE, conclude cleanly

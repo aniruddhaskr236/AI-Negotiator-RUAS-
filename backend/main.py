@@ -14,6 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from backend.bus import broadcast_all_jobs
 from backend.config import logger, settings
 from backend.llm import add_health_listener
+from backend.speech import add_speech_health_listener
 from backend.routes_http import router as http_router
 from backend.routes_ws import router as ws_router
 from backend import store
@@ -24,8 +25,9 @@ async def lifespan(app: FastAPI):
     """Application startup and shutdown hooks."""
     # Ensure SQLite tables exist
     store.init_db()
-    # Pipe LLM provider health events into the broadcast event bus
+    # Pipe LLM provider and speech health events into the broadcast event bus
     add_health_listener(broadcast_all_jobs)
+    add_speech_health_listener(broadcast_all_jobs)
     logger.info("Bhaav backend initialized successfully")
     yield
 

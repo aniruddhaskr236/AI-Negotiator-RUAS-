@@ -6,11 +6,14 @@ audio/dialogue channel from the multi-call broadcast dashboard channel.
 """
 
 import asyncio
+import base64
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from backend.bus import get_or_create_bus
 from backend.calls import call_manager
 from backend.config import logger
+from backend.speech import transcribe
+from backend import store
 
 router = APIRouter()
 
@@ -36,7 +39,33 @@ async def shop_websocket(websocket: WebSocket, shop_id: str):
                 call_id = msg.get("call_id")
                 if call_id:
                     call_manager.handle_shop_answer(call_id)
-            elif msg_type in ("text", "audio", "hangup"):
+            elif msg_type == "audio":
+                call_id = msg.get("call_id")
+                if call_id:
+                    data_b64 = msg.get("data", "")
+                    mime = msg.get("mime", "audio/webm")
+                    try:
+                        audio_bytes = base64.b64decode(data_b64) if data_b64 else b""
+                    except Exception as exc:
+                        logger.warning("Base64 decode failed for audio on call %s: %s", call_id, exc)
+                        audio_bytes = b""
+
+                    call = store.get_call(call_id)
+                    lang_hint = call.lang if call else None
+                    text, conf, needs_repeat = await transcribe(
+                        audio_bytes=audio_bytes,
+                        mime=mime,
+                        lang_hint=lang_hint,
+                    )
+                    call_manager.handle_shop_message(call_id, {
+                        "type": "audio",
+                        "call_id": call_id,
+                        "text": text,
+                        "confidence": conf,
+                        "needs_repeat": needs_repeat,
+                        "ts": msg.get("ts"),
+                    })
+            elif msg_type in ("text", "hangup"):
                 call_id = msg.get("call_id")
                 if call_id:
                     call_manager.handle_shop_message(call_id, msg)
