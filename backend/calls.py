@@ -1,8 +1,9 @@
 """
-Call manager handling parallel shop calls, timeouts, retries, and shop WebSocket sockets.
+Call manager handling parallel shop calls, timeouts, retries, and the complete dialogue loop.
 
-Design decision: Calls run as independent, isolated asyncio tasks.
-A network failure, hangup or timeout in Call 1 never blocks or terminates Call 2 or 3.
+Design decision: Parallel independent call loops with isolated state machines ensure that
+one shop hanging up or stalling never affects other concurrent negotiations.
+Evidence is updated turn-by-turn and shared across calls for verified countering.
 """
 
 import asyncio
@@ -12,16 +13,30 @@ from typing import Any, Dict, Optional
 
 from fastapi import WebSocket
 
+from backend.agent import generate_agent_utterance
 from backend.bus import publish_event
 from backend.config import logger, settings
+from backend.extract import detect_conflicts, extract_offer
 from backend.models import (
+    AgentTextMessage,
     Call,
     CallStatusEvent,
+    EndMessage,
     Job,
+    OfferEvent,
+    ReportReadyEvent,
     RingMessage,
+    Turn,
+    TurnEvent,
     Weights,
 )
+from backend.negotiation import (
+    NegotiationAction,
+    NegotiationState,
+    next_negotiation_step,
+)
 from backend.personas import DEFAULT_SHOPS
+from backend.shop_sim import ShopSimulator
 from backend import store
 
 
@@ -82,7 +97,7 @@ class CallManager:
 
     def create_job(self, need: str, weights: Weights) -> Job:
         """
-        Creates a new Job with 3 initial calls corresponding to default shop personas.
+        Creates a new Job with 3 parallel calls corresponding to default shop personas.
         Saves entities and initiates parallel call tasks.
         """
         job_id = f"j_{uuid.uuid4().hex[:8]}"
@@ -115,7 +130,7 @@ class CallManager:
         return job
 
     async def retry_call(self, job_id: str, call_id: str) -> bool:
-        """Resets a failed or done call to 'retrying' and spawns a new call task."""
+        """Resets a failed or finished call to 'retrying' and spawns a new call task."""
         call = store.get_call(call_id)
         if not call:
             return False
@@ -132,17 +147,28 @@ class CallManager:
         self.call_tasks[call_id] = task
         return True
 
+    def _check_and_notify_report_ready(self, job_id: str) -> None:
+        """Checks if all calls for this job have finished; if so, emits report_ready."""
+        calls = store.get_calls_for_job(job_id)
+        if calls and all(c.status in ("done", "failed") for c in calls):
+            publish_event(job_id, ReportReadyEvent(job_id=job_id))
+            logger.info("All calls finished for job %s. Emitted report_ready.", job_id)
+
     async def run_call_loop(self, job_id: str, call_id: str) -> None:
         """
-        Core call loop:
-        1. Rings shop socket (or auto-answers if SCRIPTED_SHOPS=1)
-        2. Waits up to 30s for 'answer'
-        3. Updates status to talking, processes conversation turns
-        4. Updates status to done / failed
+        Complete per-call live negotiation loop:
+        1. Ringing & answer handling
+        2. GREET turn with mandatory AI disclosure
+        3. Turn-by-turn dialogue, real-time offer extraction & conflict detection
+        4. State machine negotiation using verified quotes from concurrent calls
+        5. Polite CLOSE and report_ready notification
         """
         call = store.get_call(call_id)
-        if not call:
+        job = store.get_job(job_id)
+        if not call or not job:
             return
+
+        simulator = ShopSimulator(call.shop_id) if settings.scripted_shops else None
 
         try:
             # 1. Ringing state
@@ -156,15 +182,17 @@ class CallManager:
 
             # In scripted mode, auto-answer after short simulated delay
             if settings.scripted_shops:
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(0.1)
                 self.handle_shop_answer(call_id)
 
-            # 2. Wait up to configured seconds for answer (30s in prod, configurable for tests)
+            # 2. Wait up to configured seconds for answer
             answer_event = self.answer_events.get(call_id)
             answered = False
             if answer_event:
                 try:
-                    await asyncio.wait_for(answer_event.wait(), timeout=settings.call_answer_timeout)
+                    await asyncio.wait_for(
+                        answer_event.wait(), timeout=settings.call_answer_timeout
+                    )
                     answered = True
                 except asyncio.TimeoutError:
                     answered = False
@@ -177,6 +205,7 @@ class CallManager:
                     job_id,
                     CallStatusEvent(call_id=call_id, status="failed", error=call.error),
                 )
+                self._check_and_notify_report_ready(job_id)
                 return
 
             # 3. Talking state
@@ -184,12 +213,245 @@ class CallManager:
             store.save_call(call)
             publish_event(job_id, CallStatusEvent(call_id=call_id, status="talking"))
 
-            # Note: The detailed conversation dialogue loop with negotiation state machine
-            # and speech STT/TTS will be expanded in Phases 6-9.
-            # In Phase 4 skeleton, we ensure the state transitions succeed gracefully.
-            if settings.scripted_shops:
-                # Simulated brief duration for Phase 4 skeleton tests
-                await asyncio.sleep(0.2)
+            state = NegotiationState.GREET
+            refusal_count = 0
+            agent_utterance = ""
+            active_conflict = None
+
+            # 4. Turn 0: Agent Opening Utterance (GREET) with mandatory AI disclosure
+            greet_action = next_negotiation_step(
+                current_state=NegotiationState.GREET,
+                current_offer=None,
+                other_offers={},
+                user_weights=job.weights,
+                turn_count=0,
+                job_id=job_id,
+                call_id=call_id,
+                ts=time.time(),
+            )
+            agent_text, agent_trans = await generate_agent_utterance(
+                need=job.need,
+                action=greet_action,
+                dialogue_history=[],
+                target_lang=call.lang,
+            )
+            agent_utterance = agent_text
+
+            agent_turn = Turn(
+                call_id=call_id,
+                speaker="agent",
+                text=agent_text,
+                translation=agent_trans,
+                lang=call.lang,  # type: ignore
+                ts=time.time(),
+                confidence=1.0,
+            )
+            store.add_turn(agent_turn)
+            publish_event(
+                job_id,
+                TurnEvent(
+                    call_id=call_id,
+                    speaker="agent",
+                    text=agent_text,
+                    translation=agent_trans,
+                    lang=call.lang,  # type: ignore
+                    ts=agent_turn.ts,
+                ),
+            )
+            await self.send_to_shop(
+                call.shop_id,
+                AgentTextMessage(call_id=call_id, text=agent_text, lang=call.lang).model_dump(),
+            )
+            state = greet_action.next_state
+
+            # 5. Conversation turns loop (up to 14 agent turns)
+            for turn_idx in range(1, 14):
+                # Retrieve other offers for cross-shop intelligence
+                other_offers = store.get_offers_for_job(job_id)
+                competing_quote = None
+                current_offer = store.get_offer(call_id)
+                if current_offer and current_offer.price is not None:
+                    comp_offer = next(
+                        (o for cid, o in other_offers.items() if cid != call_id and o.price and o.price < current_offer.price),
+                        None,
+                    )
+                    if comp_offer:
+                        competing_quote = comp_offer.price
+
+                # A. Receive shop reply
+                shop_text = ""
+                shop_lang = call.lang
+                shop_hangup = False
+
+                if settings.scripted_shops and simulator:
+                    await asyncio.sleep(0.05)
+                    shop_text, shop_lang, shop_hangup = simulator.respond(
+                        agent_utterance=agent_utterance,
+                        competing_quote=competing_quote,
+                    )
+                else:
+                    # Live WebSocket / human shop
+                    q = self.shop_queues.get(call_id)
+                    if not q:
+                        break
+                    try:
+                        # 20s silence detection: ask once if quiet
+                        msg = await asyncio.wait_for(q.get(), timeout=20.0)
+                    except asyncio.TimeoutError:
+                        logger.info("Silence detected on call %s. Prompting shop once.", call_id)
+                        prompt_text = "Are you still there? Could you please confirm if you can hear me?"
+                        await self.send_to_shop(
+                            call.shop_id,
+                            AgentTextMessage(call_id=call_id, text=prompt_text, lang=call.lang).model_dump(),
+                        )
+                        try:
+                            msg = await asyncio.wait_for(q.get(), timeout=10.0)
+                        except asyncio.TimeoutError:
+                            call.status = "failed"
+                            call.error = "Silence timeout: shop did not respond"
+                            store.save_call(call)
+                            publish_event(
+                                job_id,
+                                CallStatusEvent(call_id=call_id, status="failed", error=call.error),
+                            )
+                            break
+
+                    mtype = msg.get("type")
+                    if mtype == "hangup":
+                        shop_hangup = True
+                    elif mtype == "text":
+                        shop_text = msg.get("text", "")
+                    elif mtype == "audio":
+                        shop_text = "[Spoken audio from shop]"
+
+                if shop_hangup:
+                    call.status = "failed"
+                    call.error = "Shop hung up"
+                    store.save_call(call)
+                    publish_event(
+                        job_id,
+                        CallStatusEvent(call_id=call_id, status="failed", error=call.error),
+                    )
+                    break
+
+                # B. Store & publish shop turn
+                turn_ts = time.time()
+                shop_turn = Turn(
+                    call_id=call_id,
+                    speaker="shop",
+                    text=shop_text,
+                    lang=shop_lang,  # type: ignore
+                    ts=turn_ts,
+                    confidence=1.0,
+                )
+                store.add_turn(shop_turn)
+                publish_event(
+                    job_id,
+                    TurnEvent(
+                        call_id=call_id,
+                        speaker="shop",
+                        text=shop_text,
+                        lang=shop_lang,  # type: ignore
+                        ts=turn_ts,
+                    ),
+                )
+
+                # Check refusal keywords
+                lower_s = shop_text.lower()
+                if any(w in lower_s for w in ["fixed", "final", "last price", "nahi hoga", "kam nahi"]):
+                    refusal_count += 1
+
+                # C. Extract offer details & detect conflicts
+                all_turns = store.get_turns_for_call(call_id)
+                old_offer = store.get_offer(call_id)
+                new_offer = extract_offer(all_turns, call_id=call_id)
+
+                conflicts = detect_conflicts(old_offer, new_offer, current_turn_ts=turn_ts)
+                for conf in conflicts:
+                    store.add_conflict(conf)
+                    publish_event(job_id, conf)
+                    active_conflict = conf.model_dump()
+
+                store.upsert_offer(new_offer)
+                publish_event(
+                    job_id,
+                    OfferEvent(
+                        call_id=call_id,
+                        price=new_offer.price,
+                        first_price=new_offer.first_price,
+                        warranty_months=new_offer.warranty_months,
+                        eta_days=new_offer.eta_days,
+                        part_type=new_offer.part_type,
+                        conditions=new_offer.conditions,
+                        confidence=new_offer.confidence,
+                        evidence=new_offer.evidence,
+                    ),
+                )
+
+                # D. Compute next negotiation action
+                other_offers = store.get_offers_for_job(job_id)
+                action = next_negotiation_step(
+                    current_state=state,
+                    current_offer=new_offer,
+                    other_offers=other_offers,
+                    user_weights=job.weights,
+                    turn_count=turn_idx,
+                    refusal_count=refusal_count,
+                    active_conflict=active_conflict,
+                    job_id=job_id,
+                    call_id=call_id,
+                    ts=turn_ts,
+                )
+                state = action.next_state
+                active_conflict = None  # Reset active conflict after handling
+
+                # E. Generate agent reply
+                agent_text, agent_trans = await generate_agent_utterance(
+                    need=job.need,
+                    action=action,
+                    dialogue_history=all_turns,
+                    target_lang=call.lang,
+                    current_shop_price=new_offer.price,
+                )
+                agent_utterance = agent_text
+
+                agent_turn = Turn(
+                    call_id=call_id,
+                    speaker="agent",
+                    text=agent_text,
+                    translation=agent_trans,
+                    lang=call.lang,  # type: ignore
+                    ts=time.time(),
+                    confidence=1.0,
+                )
+                store.add_turn(agent_turn)
+                publish_event(
+                    job_id,
+                    TurnEvent(
+                        call_id=call_id,
+                        speaker="agent",
+                        text=agent_text,
+                        translation=agent_trans,
+                        lang=call.lang,  # type: ignore
+                        ts=agent_turn.ts,
+                    ),
+                )
+                await self.send_to_shop(
+                    call.shop_id,
+                    AgentTextMessage(call_id=call_id, text=agent_text, lang=call.lang).model_dump(),
+                )
+
+                # F. If negotiation reached DECIDE or CLOSE, conclude cleanly
+                if action.next_state in (NegotiationState.DECIDE, NegotiationState.CLOSE):
+                    await self.send_to_shop(call.shop_id, EndMessage(call_id=call_id).model_dump())
+                    call.status = "done"
+                    store.save_call(call)
+                    publish_event(job_id, CallStatusEvent(call_id=call_id, status="done"))
+                    break
+
+            # If call finishes loop still talking, close cleanly as done
+            if call.status == "talking":
+                await self.send_to_shop(call.shop_id, EndMessage(call_id=call_id).model_dump())
                 call.status = "done"
                 store.save_call(call)
                 publish_event(job_id, CallStatusEvent(call_id=call_id, status="done"))
@@ -203,6 +465,8 @@ class CallManager:
                 job_id,
                 CallStatusEvent(call_id=call_id, status="failed", error=call.error),
             )
+        finally:
+            self._check_and_notify_report_ready(job_id)
 
 
 # Singleton call manager

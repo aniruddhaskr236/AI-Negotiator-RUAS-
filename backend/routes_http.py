@@ -95,6 +95,10 @@ async def get_report(job_id: str, weights: Optional[str] = Query(None)):
     caveats = []
     rank = 1
     for c in calls:
+        if c.status == "failed":
+            caveats.append(f"{c.shop_name} did not answer or failed: {c.error or 'timeout'}")
+            continue
+
         off = offers.get(c.call_id)
         if off:
             saving = (off.first_price - off.price) if (off.first_price and off.price) else 0
@@ -115,8 +119,6 @@ async def get_report(job_id: str, weights: Optional[str] = Query(None)):
                 )
             )
             rank += 1
-        elif c.status == "failed":
-            caveats.append(f"{c.shop_name} did not answer or failed: {c.error or 'timeout'}")
 
     for conf in conflicts:
         caveats.append(f"Price/term discrepancy detected for {conf.field}: was {conf.old_value}, now {conf.new_value}")

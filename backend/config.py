@@ -11,7 +11,7 @@ import logging
 from dataclasses import dataclass
 
 
-@dataclass(frozen=True)
+@dataclass
 class Settings:
     """Settings loaded from environment variables with safe defaults."""
 
