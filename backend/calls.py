@@ -159,19 +159,19 @@ class CallManager:
                 await asyncio.sleep(0.5)
                 self.handle_shop_answer(call_id)
 
-            # 2. Wait up to 30 seconds for answer
+            # 2. Wait up to configured seconds for answer (30s in prod, configurable for tests)
             answer_event = self.answer_events.get(call_id)
             answered = False
             if answer_event:
                 try:
-                    await asyncio.wait_for(answer_event.wait(), timeout=30.0)
+                    await asyncio.wait_for(answer_event.wait(), timeout=settings.call_answer_timeout)
                     answered = True
                 except asyncio.TimeoutError:
                     answered = False
 
             if not answered:
                 call.status = "failed"
-                call.error = "No answer after 30 seconds"
+                call.error = f"No answer after {int(settings.call_answer_timeout)} seconds"
                 store.save_call(call)
                 publish_event(
                     job_id,

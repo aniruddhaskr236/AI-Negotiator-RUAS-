@@ -37,6 +37,7 @@ class Settings:
     demo_controls_enabled: bool = os.getenv("DEMO_CONTROLS_ENABLED", "1").lower() in ("1", "true", "yes")
     cors_origins: str = os.getenv("CORS_ORIGINS", "*")
     port: int = int(os.getenv("PORT", "8000"))
+    call_answer_timeout: float = float(os.getenv("CALL_ANSWER_TIMEOUT", "30.0"))
 
 
 # Global settings instance
