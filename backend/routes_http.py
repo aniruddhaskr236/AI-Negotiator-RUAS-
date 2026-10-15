@@ -28,6 +28,7 @@ from backend.models import (
     Weights,
 )
 from backend import store
+from backend import scoring
 from backend.bus import publish_event
 
 router = APIRouter()
@@ -90,60 +91,13 @@ async def get_report(job_id: str, weights: Optional[str] = Query(None)):
     timeline = store.get_timeline_for_job(job_id)
     conflicts = store.get_conflicts_for_job(job_id)
 
-    # Basic rows builder for Phase 4; full scoring engine is implemented in Phase 10
-    rows = []
-    caveats = []
-    rank = 1
-    for c in calls:
-        if c.status == "failed":
-            caveats.append(f"{c.shop_name} did not answer or failed: {c.error or 'timeout'}")
-            continue
-
-        off = offers.get(c.call_id)
-        if off:
-            saving = (off.first_price - off.price) if (off.first_price and off.price) else 0
-            rows.append(
-                ReportRow(
-                    call_id=c.call_id,
-                    shop_name=c.shop_name,
-                    rank=rank,
-                    score=round(1.0 - (rank * 0.1), 2),
-                    first_price=off.first_price,
-                    final_price=off.price,
-                    saving=saving,
-                    warranty_months=off.warranty_months,
-                    eta_days=off.eta_days,
-                    part_type=off.part_type,
-                    conditions=off.conditions,
-                    evidence={},
-                )
-            )
-            rank += 1
-
-    for conf in conflicts:
-        caveats.append(f"Price/term discrepancy detected for {conf.field}: was {conf.old_value}, now {conf.new_value}")
-
-    recommended = None
-    if rows:
-        recommended = RecommendedShop(
-            call_id=rows[0].call_id,
-            shop_name=rows[0].shop_name,
-            reason=f"Best overall combination of price and terms for {job.need}.",
-        )
-
-    others = [
-        OtherShop(call_id=r.call_id, why_not="Higher quote or shorter warranty period.")
-        for r in rows[1:]
-    ]
-
-    return Report(
-        job_id=job_id,
-        recommended=recommended,
-        weights=parsed_weights,
-        rows=rows,
-        others=others,
-        caveats=caveats,
+    return scoring.build_report(
+        job=job,
+        calls=calls,
+        offers=offers,
+        conflicts=conflicts,
         timeline=timeline,
+        custom_weights=parsed_weights,
     )
 
 
